@@ -2,15 +2,8 @@ import { APIGatewayProxyEventV2 } from './apiGW.model';
 import { CiscoIPPhoneInput, CiscoIPPhoneText, InputItem, InputItemType, CiscoXMLRoot } from './phoneXML.model';
 
 /**
- *
- * Event doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html#api-gateway-simple-proxy-for-lambda-input-format
- * @param {Object} event - API Gateway Lambda Proxy Input Format
- *
- * Return doc: https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-lambda-proxy-integrations.html
- * @returns {Object} object - API Gateway Lambda Proxy Output Format
- *
+ *  Simple 
  */
-
 export const lambdaHandler = async (api_gw_event: APIGatewayProxyEventV2): Promise<XMLResponse> => {
     console.log(JSON.stringify(api_gw_event));
 
@@ -25,14 +18,14 @@ export const lambdaHandler = async (api_gw_event: APIGatewayProxyEventV2): Promi
         let xml: CiscoXMLRoot;
         switch (operation) {
             case PathOperation.init:
-                xml = new CiscoIPPhoneInput({ title: 'AWS Connect CCP Login' }, event.selfURL("login").href, [
+                xml = new CiscoIPPhoneInput({ title: 'Login Demo' }, event.selfURL("login").href, [
                     new InputItem("Username", "username"),
                     new InputItem("Password", "password", InputItemType.Password),
                     new InputItem("PhoneNumnber", "phone", InputItemType.TelephoneNumber),
                 ]);
                 break;
             case PathOperation.login:
-                xml = new CiscoIPPhoneText({ title: 'AWS Connect CCP Login' }, "You are now logged in");
+                xml = new CiscoIPPhoneText({ title: 'Login Demo Result' }, "You are now logged in");
                 break;
             case PathOperation.unknown:
             default:
@@ -45,6 +38,12 @@ export const lambdaHandler = async (api_gw_event: APIGatewayProxyEventV2): Promi
         return new ErrorResponse(err);
     }
 };
+
+enum PathOperation {
+    init = 'init',
+    login = 'login',
+    unknown = 'unknown'
+}
 
 class ProxyEvent {
     event: APIGatewayProxyEventV2;
@@ -77,10 +76,10 @@ class ProxyEvent {
             host = this.event?.headers?.['host'] || this.event?.headers?.['Host'] || "127.0.0.1:3000";
         } else {
             // Https is in the cloud (since http is not supported in API-GW)
-            host = this.event.requestContext.domainName;
+            host = this.event?.headers?.['x-forwarded-for'] || this.event.requestContext.domainName;
         }
 
-        let url: URL = new URL(`${proto}://${host}/${path || ""}`);
+        let url: URL = new URL(`http://${host}/${path || ""}`);
 
         // Add back all the original query params
         let qsp = this.event.queryStringParameters;
@@ -94,12 +93,6 @@ class ProxyEvent {
     }
 }
 
-enum PathOperation {
-    init = 'init',
-    login = 'login',
-    status = 'status',
-    unknown = 'unknown'
-}
 
 class XMLResponse {
     statusCode: number = 200;
@@ -120,7 +113,7 @@ class ErrorResponse extends XMLResponse {
         let message;
         if (error instanceof Error) message = error.message
         else message = String(error);
-        super(new CiscoIPPhoneText({ title: 'Backend System Error', prompt: 'Please login again' }, message));
+        super(new CiscoIPPhoneText({ title: 'Backend System Error', prompt: 'Please try again' }, message));
     }
 }
 

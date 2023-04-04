@@ -4,5 +4,6 @@
 /.settings/
 /.classpath
 /.project
+/.vscode
 /.aws-sam/
 /dependency-reduced-pom.xml
