@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  cisco-phone-services-proxy
+
+  SAM function on API-GW that can be accessed by HTTP via NGINX Proxy
+  
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Architectures:
+      - arm64  
+
+Resources:
+  ApiGateway:
+        Type: AWS::Serverless::HttpApi
+        Properties:
+            CorsConfiguration: true
+    
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: app.lambdaHandler
+      Events:
+        Operation:
+          Type: HttpApi
+          Properties:
+            Path: /{operation}
+            Method: get
+            ApiId: !Ref ApiGateway
+        Root:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: get
+            ApiId: !Ref ApiGateway
+    Metadata: # Manage esbuild properties
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: "es2020"
+        Sourcemap: true
+        EntryPoints: 
+        - app.ts
+        
+  VPCStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: vpc.yaml
+      TimeoutInMinutes: '60'
+      
+  IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        # allow SSM management so you can connect to instance via console (no key needed)
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+  
+  IamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: [!Ref IamRole]
+      
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow Web Traffic to Instance
+      VpcId: !GetAtt VPCStack.Outputs.VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: "-1"
+        FromPort: "-1"
+        ToPort: "-1"
+        CidrIp: 0.0.0.0/0
+        
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref IamInstanceProfile  #Let SSM manage this
+      InstanceType: t4g.nano  # smallest image, all that is needed for a simple proxy
+      SubnetId: !GetAtt VPCStack.Outputs.PublicSubnet1
+      SecurityGroupIds: [ !Ref SecurityGroup ]
+      ImageId: ami-0cd7323ab3e63805f  #This is AL2 Linux Image for us-east-1
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            VolumeType: gp3
+            VolumeSize: 8
+      UserData: 
+        Fn::Base64:
+          Fn::Sub: |
+            #!/bin/bash -xe
+            yum install -y aws-cfn-bootstrap cloud-init aws-cli
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets ec2_setup
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region}
+    CreationPolicy:
+        ResourceSignal:
+          Count: 1
+          Timeout: PT20M
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          ec2_setup:
+            - config_cfn
+            - prepare_system
+            - install_nginx
+            - configure_nginx
+        config_cfn:
+          files:
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack=${AWS::StackId}
+                region=${AWS::Region}
+              mode: '000400'
+              owner: root
+              group: root
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.EC2Instance.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --region ${AWS::Region} --configsets ec2_setup
+                runas=root
+          services:
+            sysvinit:
+              cfn-hup:
+                enabled: true
+                ensureRunning: true
+                files:
+                  - /etc/cfn/cfn-hup.conf
+                  - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        prepare_system:
+          commands:
+            extras:
+              # NGINX is part of the extras in AL2
+              command: 'amazon-linux-extras enable nginx1'
+            clean:
+              # required after enabling above
+              command: 'yum clean metadata'
+        install_nginx:
+          packages:
+            yum:
+              nginx: []        
+        configure_nginx:
+          files:
+            # add the minimal commands into the default server config which is port 80
+            /etc/nginx/default.d/api-gw-proxy.conf:
+              content: !Sub |
+                resolver 8.8.8.8 valid=10s;
+                location  / {
+                    proxy_pass ${ApiGateway.ApiEndpoint};
+                    proxy_ssl_protocols TLSv1.2;
+                    proxy_ssl_server_name on;
+                    proxy_ssl_name ${ApiGateway}.execute-api.${AWS::Region}.${AWS::URLSuffix};
+                }
+          services:
+            sysvinit:
+              nginx:
+                enabled: 'true'
+                ensureRunning: 'true'
+                files:
+                  - /etc/nginx/default.d/api-gw-proxy.conf       
+      
+
+Outputs:
+  ApiGW:
+    Description: "API Gateway endpoint URL that supports only HTTPS"
+    Value: !GetAtt ApiGateway.ApiEndpoint
+  EC2IP:
+    Description: "NGINX EC2 Instance IP, Subscribe Cisco Phone to this URL"
+    Value: !Join ['', ['http://',!GetAtt EC2Instance.PublicIp ]]
+       
